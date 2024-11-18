@@ -3,32 +3,36 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <sys/stat.h>
+#include <vector>
+#include <algorithm>
+#include <stdexcept>
+#include <windows.h>
 #include <openssl/sha.h>
 
 // 判断路径是否是文件夹
-bool IsDirectory(const std::string& path) {
-    struct stat info;
-    if (stat(path.c_str(), &info) != 0) {
-        return false; // 无法访问该路径
-    }
-    return (info.st_mode & S_IFDIR) != 0; // 是否为目录
+bool IsDirectory(const std::string &path) {
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    return (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY));
 }
 
 // 判断路径是否是文件
-bool IsFile(const std::string& path) {
-    struct stat info;
-    if (stat(path.c_str(), &info) != 0) {
-        return false; // 无法访问该路径
-    }
-    return (info.st_mode & S_IFREG) != 0; // 是否为普通文件
+bool IsFile(const std::string &path) {
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    return (attributes != INVALID_FILE_ATTRIBUTES &&
+            !(attributes & FILE_ATTRIBUTE_DIRECTORY));
 }
 
 // 计算文件的 SHA256 哈希值
-std::string CalculateFileHash(const std::string& file_path) {
+std::string CalculateFileHash(const std::string &file_path) {
     std::ifstream file(file_path, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open file: " + file_path);
+    }
+
+    // 检查文件是否为空
+    if (file.peek() == std::ifstream::traits_type::eof()) {
+        return "EMPTY_FILE";
     }
 
     SHA256_CTX sha256;
@@ -50,26 +54,86 @@ std::string CalculateFileHash(const std::string& file_path) {
     return ss.str();
 }
 
+// 递归遍历目录中的文件
+void ProcessDirectory(const std::string &dir_path) {
+    std::string search_path = dir_path + "\\*";
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA(search_path.c_str(), &find_data);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("Failed to open directory: " + dir_path);
+    }
+
+    std::vector<std::string> entries;
+
+    // 收集目录中的所有条目
+    do {
+        std::string entry_name = find_data.cFileName;
+
+        // 跳过 "." 和 ".."
+        if (entry_name != "." && entry_name != "..") {
+            std::string full_path = dir_path;
+
+            // 确保路径末尾只有一个斜杠
+            if (full_path.back() != '\\' && full_path.back() != '/') {
+                full_path += '/';
+            }
+            full_path += entry_name;
+
+            // 将路径格式统一为 "/"
+            std::replace(full_path.begin(), full_path.end(), '\\', '/');
+
+            entries.push_back(full_path);
+        }
+    } while (FindNextFileA(hFind, &find_data) != 0);
+
+    FindClose(hFind);
+
+    // 对条目按文件名排序
+    std::sort(entries.begin(), entries.end());
+
+    // 递归处理排序后的条目
+    for (const auto &entry: entries) {
+        if (IsDirectory(entry)) {
+            ProcessDirectory(entry);
+        } else if (IsFile(entry)) {
+            try {
+                std::string hash = CalculateFileHash(entry);
+                // 增大对齐宽度
+                std::cout << std::left << std::setw(50) << entry << ": " << hash << std::endl;
+            } catch (const std::exception &e) {
+                std::cerr << "Error processing file " << entry << ": " << e.what() << std::endl;
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        std::cout << R"(Usage: .\file_hash_checker.exe <file_or_dir>)" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <directory>" << std::endl;
         return 1;
     }
 
     std::string input_path = argv[1];
 
     if (IsDirectory(input_path)) {
-        std::cout << input_path << " is a directory." << std::endl;
-        // 在此处可以添加目录处理逻辑
+        try {
+            ProcessDirectory(input_path);
+        } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            return 1;
+        }
     } else if (IsFile(input_path)) {
         try {
             std::string hash = CalculateFileHash(input_path);
-            std::cout << "SHA256 Hash of file " << input_path << ": " << hash << std::endl;
+            std::cout << std::left << std::setw(40) << input_path << ": " << hash << std::endl;
         } catch (const std::exception &e) {
             std::cerr << "Error: " << e.what() << std::endl;
+            return 1;
         }
     } else {
         std::cerr << input_path << " is neither a file nor a directory." << std::endl;
+        return 1;
     }
 
     return 0;
